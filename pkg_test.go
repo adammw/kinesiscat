@@ -125,6 +125,10 @@ var _ = Describe("kinesiscat", func() {
 			Expect(actual).To(ContainSubstring("Usage:"))
 			Expect(exitCode).To(Equal(2))
 		})
+
+		It("does things", func() {
+
+		})
 	})
 
 	Describe(".fatalfIfErr", func() {
@@ -145,6 +149,13 @@ var _ = Describe("kinesiscat", func() {
 			})
 			Expect(exitCode).To(Equal(1))
 			Expect(stderr).To(Equal("foo: bar"))
+		})
+	})
+
+	Describe(".buildKinesisClient", func() {
+		It("builds a client", func() {
+			client := buildKinesisClient("us-west-1")
+			Expect(client).To(Not(BeNil()))
 		})
 	})
 

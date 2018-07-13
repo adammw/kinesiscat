@@ -33,7 +33,7 @@ func fatalfIfErr(format string, err error) {
 	}
 }
 
-func makeKinesisClient(region string) (client kinesisiface.KinesisAPI) {
+func buildKinesisClient(region string) (client kinesisiface.KinesisAPI) {
 	awsConfig := aws.NewConfig().WithRegion(region)
 	awsSession, err := session.NewSession(awsConfig)
 	fatalfIfErr("aws error: %v", err)
@@ -65,7 +65,7 @@ func main() {
 		exitFn(2)
 	}
 
-	var client = makeKinesisClient(opts.Region)
+	var client = buildKinesisClient(opts.Region)
 	var shardIds = getShardIds(client, opts.Args.StreamName)
 	log.Print(shardIds)
 
