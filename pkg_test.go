@@ -6,19 +6,15 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bouk/monkey"
+	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
 func TestSetup(t *testing.T) {
-	dir, _ := os.Getwd()
-	os.Setenv("FOLDER", dir)
-
-	go main()
-
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Example")
+	RunSpecs(t, "kinesiscat")
 }
 
 // https://stackoverflow.com/questions/10473800/in-go-how-do-i-capture-stdout-of-a-function-into-a-string
@@ -73,15 +69,6 @@ func captureAll(fn func()) (stdout string, stderr string) {
 	return
 }
 
-func captureExit(fn func()) (exitCode int) {
-	exitCode = -1
-	fakeExit := func(code int) { exitCode = code }
-	patch := monkey.Patch(os.Exit, fakeExit)
-	defer patch.Unpatch()
-	fn()
-	return
-}
-
 func withOsArgs(args []string, fn func()) {
 	old := os.Args
 	os.Args = args
@@ -91,20 +78,62 @@ func withOsArgs(args []string, fn func()) {
 	fn()
 }
 
+func captureFail(fn func()) (e error) {
+	e = nil
+	origFailIfErr := failIfErr
+	failIfErr = func(err error) {
+		e = err
+		if err != nil {
+			panic(err)
+		}
+	}
+	defer func() {
+		failIfErr = origFailIfErr
+		recover()
+	}()
+	fn()
+	return
+}
+
+type mockKinesisClient struct {
+	kinesisiface.KinesisAPI
+}
+
+func (m *mockKinesisClient) DescribeStreamPages(input *kinesis.DescribeStreamInput, fn func(*kinesis.DescribeStreamOutput, bool) bool) error {
+	output := kinesis.DescribeStreamOutput{
+		StreamDescription: &kinesis.StreamDescription{
+			Shards: []*kinesis.Shard{},
+		},
+	}
+
+	fn(&output, true)
+	return nil
+}
+
 var _ = Describe("kinesiscat", func() {
 	Describe("main", func() {
 		It("shows help", func() {
+			var actual string
+			var err error
 
-			withOsArgs([]string{"kinesiscat", "-help"}, func() {
-				exitCode := captureExit(func() {
-					actual := captureStderr(func() {
+			withOsArgs([]string{"kinesiscat", "--help"}, func() {
+				actual = captureStdout(func() {
+					err = captureFail(func() {
 						main()
 					})
-					Expect(actual).To(ContainSubstring("Usage of kinesiscat:"))
 				})
-				Expect(exitCode).To(Equal(2))
 			})
 
+			Expect(actual).To(ContainSubstring("Usage:"))
+			Expect(err).To(Not(BeNil()))
+		})
+	})
+
+	Describe(".getShardIds", func() {
+		It("returns empty array when no shards found", func() {
+			mockSvc := &mockKinesisClient{}
+			actual := getShardIds(mockSvc, "fake-stream")
+			Expect(actual).To(Equal([]string{}))
 		})
 	})
 })
