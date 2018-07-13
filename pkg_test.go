@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"errors"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	. "github.com/onsi/ginkgo"
@@ -78,22 +79,19 @@ func withOsArgs(args []string, fn func()) {
 	fn()
 }
 
-func captureFail(fn func()) (e error) {
-	e = nil
-	origFailIfErr := failIfErr
-	failIfErr = func(err error) {
-		e = err
-		if err != nil {
-			panic(err)
-		}
-	}
+func captureExit(fn func()) (code int) {
+	code = -1
+	origExitFn := exitFn
+	exitFn = func(c int) { code = c; panic(nil) }
 	defer func() {
-		failIfErr = origFailIfErr
+		exitFn = origExitFn
 		recover()
 	}()
 	fn()
 	return
 }
+
+var shards []*kinesis.Shard
 
 type mockKinesisClient struct {
 	kinesisiface.KinesisAPI
@@ -102,7 +100,7 @@ type mockKinesisClient struct {
 func (m *mockKinesisClient) DescribeStreamPages(input *kinesis.DescribeStreamInput, fn func(*kinesis.DescribeStreamOutput, bool) bool) error {
 	output := kinesis.DescribeStreamOutput{
 		StreamDescription: &kinesis.StreamDescription{
-			Shards: []*kinesis.Shard{},
+			Shards: shards,
 		},
 	}
 
@@ -114,26 +112,58 @@ var _ = Describe("kinesiscat", func() {
 	Describe("main", func() {
 		It("shows help", func() {
 			var actual string
-			var err error
+			var exitCode int
 
 			withOsArgs([]string{"kinesiscat", "--help"}, func() {
 				actual = captureStdout(func() {
-					err = captureFail(func() {
+					exitCode = captureExit(func() {
 						main()
 					})
 				})
 			})
 
 			Expect(actual).To(ContainSubstring("Usage:"))
-			Expect(err).To(Not(BeNil()))
+			Expect(exitCode).To(Equal(2))
+		})
+	})
+
+	Describe(".fatalfIfErr", func() {
+		It("no-ops when err == nil", func() {
+			exitCode := captureExit(func() {
+				fatalfIfErr("foo", nil)
+			})
+			Expect(exitCode).To(Equal(-1)) // not called
+		})
+
+		It("exits when there is an err", func() {
+			err := errors.New("bar")
+			var exitCode int
+			stderr := captureStderr(func() {
+				exitCode = captureExit(func() {
+					fatalfIfErr("foo: %v", err)
+				})
+			})
+			Expect(exitCode).To(Equal(1))
+			Expect(stderr).To(Equal("foo: bar"))
 		})
 	})
 
 	Describe(".getShardIds", func() {
 		It("returns empty array when no shards found", func() {
 			mockSvc := &mockKinesisClient{}
+			shards = []*kinesis.Shard{}
+
 			actual := getShardIds(mockSvc, "fake-stream")
 			Expect(actual).To(Equal([]string{}))
+		})
+
+		It("returns an array of shards found", func() {
+			mockSvc := &mockKinesisClient{}
+			shardIds := []string{"foo123", "foo124"}
+			shards = []*kinesis.Shard{{ShardId: &shardIds[0]}, {ShardId: &shardIds[1]}}
+
+			actual := getShardIds(mockSvc, "fake-stream")
+			Expect(actual).To(Equal(shardIds))
 		})
 	})
 })

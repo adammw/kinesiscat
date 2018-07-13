@@ -10,6 +10,7 @@ import (
 
 	"github.com/jessevdk/go-flags"
 
+	"fmt"
 	"os"
 )
 
@@ -23,18 +24,19 @@ type Options struct {
 	} `positional-args:"yes" required:"yes"`
 }
 
-var failIfErr = func(err error) {
+var exitFn = os.Exit
+
+func fatalfIfErr(format string, err error) {
 	if err != nil {
-		os.Exit(2)
+		fmt.Fprintf(os.Stderr, format, err)
+		exitFn(1)
 	}
 }
 
 func makeKinesisClient(region string) (client kinesisiface.KinesisAPI) {
 	awsConfig := aws.NewConfig().WithRegion(region)
 	awsSession, err := session.NewSession(awsConfig)
-	if err != nil {
-		log.Fatalf("aws error: %v", err)
-	}
+	fatalfIfErr("aws error: %v", err)
 	return kinesis.New(awsSession, awsConfig)
 }
 
@@ -52,16 +54,16 @@ func getShardIds(client kinesisiface.KinesisAPI, streamName string) (shardIds []
 			return true
 		},
 	)
-	if err != nil {
-		log.Fatalf("get shards error: %v", err)
-	}
+	fatalfIfErr("get shards error: %v", err)
 	return
 }
 
 func main() {
 	var opts Options
 	_, err := flags.ParseArgs(&opts, os.Args[1:])
-	failIfErr(err)
+	if err != nil {
+		exitFn(2)
+	}
 
 	var client = makeKinesisClient(opts.Region)
 	var shardIds = getShardIds(client, opts.Args.StreamName)
