@@ -1,3 +1,4 @@
 # Output of the go coverage tool
 coverage.out
 vendor/
+kinesiscat
