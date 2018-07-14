@@ -1,23 +1,24 @@
 package main
 
 import (
-	//
+	"bytes"
+	"fmt"
+	"os"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-
-	"github.com/jessevdk/go-flags"
-
-	"bytes"
-	"fmt"
 	"github.com/golang/protobuf/proto"
+	"github.com/jessevdk/go-flags"
 	"github.com/zendesk/kinesiscat/kpl"
-	"os"
+	"sync"
 )
 
-var MAGIC = []byte("\xf3\x89\x9a\xc2")
-var NEWLINE = []byte{'\n'}
+const Md5Len = 16
+
+var ProtobufHeader = []byte("\xf3\x89\x9a\xc2")
+var Newline = []byte{'\n'}
 
 type Options struct {
 	Region string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
@@ -76,31 +77,54 @@ func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardI
 	return
 }
 
-func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, stream *os.File) {
-	params := kinesis.GetRecordsInput{
-		ShardIterator: &shardIterator,
+func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func(*[]byte)) {
+	var err error
+	var resp *kinesis.GetRecordsOutput
+
+	for err == nil {
+		params := kinesis.GetRecordsInput{
+			ShardIterator: &shardIterator,
+		}
+		resp, err = client.GetRecords(&params)
+		fatalfIfErr("get records error: %v", err)
+
+		eachRecord(resp.Records, fn)
+
+		if resp.NextShardIterator == nil {
+			break
+		}
+		shardIterator = *resp.NextShardIterator
 	}
-	resp, err := client.GetRecords(&params)
-	fatalfIfErr("get records error: %v", err)
-	MD5_SIZE := 16
-	for _, record := range resp.Records {
-		// see https://github.com/awslabs/amazon-kinesis-producer/blob/master/aggregation-format.md
+}
 
-		is_aggregated := bytes.Compare(record.Data[0:len(MAGIC)], MAGIC) == 0
+func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
+	for _, record := range aggregatedRecords {
+		isAggregated := bytes.Compare(record.Data[0:len(ProtobufHeader)], ProtobufHeader) == 0
 
-		if is_aggregated {
+		if isAggregated {
+			// see https://github.com/awslabs/amazon-kinesis-producer/blob/master/aggregation-format.md
 			agg := &kpl.AggregatedRecord{}
-			err := proto.Unmarshal(record.Data[len(MAGIC):len(record.Data)-MD5_SIZE], agg)
+			err := proto.Unmarshal(record.Data[len(ProtobufHeader):len(record.Data)-Md5Len], agg)
 			fatalfIfErr("protobuf unmarshal error: %v", err)
-			for _, r := range agg.Records {
-				stream.Write(r.Data)
-				stream.Write(NEWLINE)
+			for _, record := range agg.Records {
+				fn(&record.Data)
 			}
 		} else {
-			stream.Write(record.Data)
-			stream.Write(NEWLINE)
+			fn(&record.Data)
 		}
 	}
+}
+
+func parallel(things []string, fn func(string)) {
+	var wg sync.WaitGroup
+	for _, thing := range things {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn(thing)
+		}()
+	}
+	wg.Wait()
 }
 
 func main() {
@@ -113,58 +137,12 @@ func main() {
 	var client = buildKinesisClient(opts.Region)
 	var shardIds = getShardIds(client, opts.Args.StreamName)
 	var shardIterators = getShardIterators(client, opts.Args.StreamName, shardIds)
-	for _, shardIterator := range shardIterators {
-		streamRecords(client, shardIterator, os.Stdout)
-	}
 
-	//ctx, cancel := context.WithCancel(ctx)
-	//defer cancel()
-	//
-	//
-	//
-	//
-	//
-	//// start
-	//err = c.Scan(context.TODO(), func(r *consumer.Record) consumer.ScanError {
-	//	if r.ApproximateArrivalTimestamp.Before(startTimestamp) {
-	//		return consumer.ScanError{
-	//			StopScan:       false,  // true to stop scan
-	//			SkipCheckpoint: false,  // true to skip checkpoint
-	//		}
-	//	}
-	//
-	//	agg := &kpl.AggregatedRecord{}
-	//
-	//	data := r.Data
-	//
-	//	// see https://github.com/awslabs/amazon-kinesis-producer/blob/master/aggregation-format.md
-	//	is_aggregated := bytes.Compare(data[0:len(MAGIC)], MAGIC) == 0
-	//
-	//	if is_aggregated {
-	//
-	//		err := proto.Unmarshal(data[4:len(data)-15], agg)
-	//		if err != nil {
-	//			// ignore errors
-	//			// log.Printf("Failed to parse record:", err)
-	//		}
-	//
-	//		for _, r := range agg.Records {
-	//			fmt.Println(string(r.Data))
-	//		}
-	//	} else {
-	//		fmt.Println(string(data))
-	//	}
-	//
-	//	// continue scanning
-	//	return consumer.ScanError{
-	//		StopScan:       false,  // true to stop scan
-	//		SkipCheckpoint: false,  // true to skip checkpoint
-	//	}
-	//})
-	//if err != nil {
-	//	log.Fatalf("scan error: %v", err)
-	//}
-
-	// Note: If you need to aggregate based on a specific shard the `ScanShard`
-	// method should be leverged instead.
+	parallel(shardIterators, func(shardIterator string) {
+		streamRecords(client, shardIterator, func(data *[]byte) {
+			line := append([]byte{}, *data...)
+			line = append(line, Newline...)
+			os.Stdout.Write(line)
+		})
+	})
 }
