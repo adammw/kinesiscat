@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"errors"
+	"fmt"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	. "github.com/onsi/ginkgo"
@@ -97,6 +98,14 @@ type mockKinesisClient struct {
 	kinesisiface.KinesisAPI
 }
 
+func (m *mockKinesisClient) GetShardIterator(input *kinesis.GetShardIteratorInput) (output *kinesis.GetShardIteratorOutput, err error) {
+	iterator := fmt.Sprintf("shard-iterator-%s-%s", *input.StreamName, *input.ShardId)
+	output = &kinesis.GetShardIteratorOutput{
+		ShardIterator: &iterator,
+	}
+	return
+}
+
 func (m *mockKinesisClient) DescribeStreamPages(input *kinesis.DescribeStreamInput, fn func(*kinesis.DescribeStreamOutput, bool) bool) error {
 	output := kinesis.DescribeStreamOutput{
 		StreamDescription: &kinesis.StreamDescription{
@@ -175,6 +184,16 @@ var _ = Describe("kinesiscat", func() {
 
 			actual := getShardIds(mockSvc, "fake-stream")
 			Expect(actual).To(Equal(shardIds))
+		})
+	})
+
+	Describe(".getShardIterators", func() {
+		It("returns an array of shard iterator ids", func() {
+			mockSvc := &mockKinesisClient{}
+			shardIds := []string{"foo123", "foo124"}
+			shardIterators := []string{"shard-iterator-fake-stream-foo123", "shard-iterator-fake-stream-foo124"}
+			actual := getShardIterators(mockSvc, "fake-stream", shardIds)
+			Expect(actual).To(Equal(shardIterators))
 		})
 	})
 })
