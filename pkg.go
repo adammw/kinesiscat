@@ -94,6 +94,7 @@ func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func
 		}
 
 		resp, err = client.GetRecords(&params)
+		// TODO: turn backoff into a method
 		if err != nil {
 			if aerr, ok := err.(awserr.Error); ok {
 				// retry on ProvisionedThroughputExceededException with exponential backoff
@@ -122,7 +123,9 @@ func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func
 
 func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
 	for _, record := range aggregatedRecords {
-		isAggregated := bytes.Compare(record.Data[0:len(ProtobufHeader)], ProtobufHeader) == 0
+		isAggregated :=
+			len(record.Data) > len(ProtobufHeader) &&
+				bytes.Compare(record.Data[0:len(ProtobufHeader)], ProtobufHeader) == 0
 
 		if isAggregated {
 			// see https://github.com/awslabs/amazon-kinesis-producer/blob/master/aggregation-format.md
