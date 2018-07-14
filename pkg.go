@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/adammw/kinesiscat/kpl"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -12,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/golang/protobuf/proto"
 	"github.com/jessevdk/go-flags"
-	"github.com/zendesk/kinesiscat/kpl"
 	"sync"
 	"time"
 )

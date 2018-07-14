@@ -8,12 +8,12 @@ import (
 
 	"errors"
 	"fmt"
+	"github.com/adammw/kinesiscat/kpl"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/golang/protobuf/proto"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/zendesk/kinesiscat/kpl"
 )
 
 func TestSetup(t *testing.T) {
