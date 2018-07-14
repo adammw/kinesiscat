@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/golang/protobuf/proto"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/zendesk/kinesiscat/kpl"
 )
 
 func TestSetup(t *testing.T) {
@@ -93,9 +95,17 @@ func captureExit(fn func()) (code int) {
 }
 
 var shards []*kinesis.Shard
+var records []*kinesis.Record
 
 type mockKinesisClient struct {
 	kinesisiface.KinesisAPI
+}
+
+func (m *mockKinesisClient) GetRecords(*kinesis.GetRecordsInput) (output *kinesis.GetRecordsOutput, err error) {
+	output = &kinesis.GetRecordsOutput{
+		Records: records,
+	}
+	return
 }
 
 func (m *mockKinesisClient) GetShardIterator(input *kinesis.GetShardIteratorInput) (output *kinesis.GetShardIteratorOutput, err error) {
@@ -168,6 +178,44 @@ var _ = Describe("kinesiscat", func() {
 		})
 	})
 
+	Describe(".eachRecord", func() {
+		It("passes through un-aggregated records", func() {
+			inRecords := []*kinesis.Record{
+				{Data: []byte("foo")},
+				{Data: []byte("bar")},
+			}
+			outRecords := [][]byte{}
+			eachRecord(inRecords, func(record *[]byte) {
+				outRecords = append(outRecords, *record)
+			})
+			Expect(outRecords).To(ContainElement([]byte("foo")))
+			Expect(outRecords).To(ContainElement([]byte("bar")))
+		})
+
+		It("handles aggregated records", func() {
+			partitionKeyIndex := uint64(0)
+			protoData, err := proto.Marshal(&kpl.AggregatedRecord{
+				Records: []*kpl.Record{
+					{PartitionKeyIndex: &partitionKeyIndex, Data: []byte("foo")},
+					{PartitionKeyIndex: &partitionKeyIndex, Data: []byte("bar")},
+				},
+			})
+			Expect(err).To(BeNil())
+			md5Data := make([]byte, Md5Len) // TODO: calculate checksum
+
+			aggregatedRecordData := ProtobufHeader
+			aggregatedRecordData = append(aggregatedRecordData, protoData...)
+			aggregatedRecordData = append(aggregatedRecordData, md5Data...)
+			inRecords := []*kinesis.Record{{Data: aggregatedRecordData}}
+
+			outRecords := [][]byte{}
+			eachRecord(inRecords, func(record *[]byte) {
+				outRecords = append(outRecords, *record)
+			})
+			Expect(outRecords).To(ContainElement([]byte("foo")))
+			Expect(outRecords).To(ContainElement([]byte("bar")))
+		})
+	})
 	Describe(".getShardIds", func() {
 		It("returns empty array when no shards found", func() {
 			mockSvc := &mockKinesisClient{}
@@ -194,6 +242,35 @@ var _ = Describe("kinesiscat", func() {
 			shardIterators := []string{"shard-iterator-fake-stream-foo123", "shard-iterator-fake-stream-foo124"}
 			actual := getShardIterators(mockSvc, "fake-stream", shardIds)
 			Expect(actual).To(Equal(shardIterators))
+		})
+	})
+
+	Describe(".parallel", func() {
+		It("runs the method with the arg passed in for each", func() {
+			things := []string{"foo", "bar"}
+			calls := []string{}
+			parallel(things, func(thing string) {
+				calls = append(calls, thing)
+			})
+			Expect(len(calls)).To(Equal(len(things)))
+			Expect(calls).To(ContainElement("foo"))
+			Expect(calls).To(ContainElement("bar"))
+		})
+
+		It("runs the methods in parallel", func() {
+			// TODO
+		})
+	})
+
+	Describe(".streamRecords", func() {
+		It("does the thing", func() {
+			mockSvc := &mockKinesisClient{}
+
+			// TODO: actually test this
+
+			streamRecords(mockSvc, "AABBCC", func(_ *[]byte) {
+
+			})
 		})
 	})
 })

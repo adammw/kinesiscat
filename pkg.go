@@ -142,10 +142,10 @@ func parallel(things []string, fn func(string)) {
 	var wg sync.WaitGroup
 	for _, thing := range things {
 		wg.Add(1)
-		go func() {
+		go func(thing string) {
 			defer wg.Done()
 			fn(thing)
-		}()
+		}(thing)
 	}
 	wg.Wait()
 }
