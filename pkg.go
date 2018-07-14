@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
@@ -13,6 +14,7 @@ import (
 	"github.com/jessevdk/go-flags"
 	"github.com/zendesk/kinesiscat/kpl"
 	"sync"
+	"time"
 )
 
 const Md5Len = 16
@@ -30,10 +32,14 @@ type Options struct {
 
 var exitFn = os.Exit
 
+func fatalErr(format string, a ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, a...)
+	exitFn(1)
+}
+
 func fatalfIfErr(format string, err error) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, format, err)
-		exitFn(1)
+		fatalErr(format, err)
 	}
 }
 
@@ -80,13 +86,30 @@ func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardI
 func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func(*[]byte)) {
 	var err error
 	var resp *kinesis.GetRecordsOutput
+	var errCount uint = 0
 
 	for err == nil {
 		params := kinesis.GetRecordsInput{
 			ShardIterator: &shardIterator,
 		}
+
 		resp, err = client.GetRecords(&params)
-		fatalfIfErr("get records error: %v", err)
+		if err != nil {
+			if aerr, ok := err.(awserr.Error); ok {
+				// retry on ProvisionedThroughputExceededException with exponential backoff
+				if aerr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException {
+					time.Sleep(1 << errCount)
+					errCount += 1
+					err = nil
+					continue
+				} else {
+					fatalErr("get records error: %v", err)
+				}
+			}
+		} else {
+			// reset backoff counter on success
+			errCount = 0
+		}
 
 		eachRecord(resp.Records, fn)
 
