@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/adammw/kinesiscat/kpl"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/golang/protobuf/proto"
@@ -96,20 +97,26 @@ func captureExit(fn func()) (code int) {
 	return
 }
 
+func captureExitAndMessage(fn func()) (exitCode int, stderr string) {
+	stderr = captureStderr(func() {
+		exitCode = captureExit(fn)
+	})
+	return
+}
+
 var shards []*kinesis.Shard
 var getRecordsOutput = &kinesis.GetRecordsOutput{
 	Records:           []*kinesis.Record{},
 	NextShardIterator: nil,
 }
-var storedNil string
+var getRecordsErr error
 
 type mockKinesisClient struct {
 	kinesisiface.KinesisAPI
 }
 
 func (m *mockKinesisClient) GetRecords(*kinesis.GetRecordsInput) (output *kinesis.GetRecordsOutput, err error) {
-	output = getRecordsOutput
-	return
+	return getRecordsOutput, getRecordsErr
 }
 
 func (m *mockKinesisClient) GetShardIterator(input *kinesis.GetShardIteratorInput) (output *kinesis.GetShardIteratorOutput, err error) {
@@ -131,6 +138,22 @@ func (m *mockKinesisClient) DescribeStreamPages(input *kinesis.DescribeStreamInp
 	return nil
 }
 
+var callCount = 0
+
+type mockErrKinesisClient struct {
+	kinesisiface.KinesisAPI
+}
+
+func (m *mockErrKinesisClient) GetRecords(*kinesis.GetRecordsInput) (output *kinesis.GetRecordsOutput, err error) {
+	callCount += 1
+	if callCount == 1 {
+		return nil, getRecordsErr
+	} else {
+		return getRecordsOutput, nil
+	}
+
+}
+
 func duration(fn func()) (duration time.Duration) {
 	start := time.Now()
 	fn()
@@ -141,7 +164,10 @@ var _ = Describe("kinesiscat", func() {
 	BeforeEach(func() {
 		getRecordsOutput.Records = []*kinesis.Record{}
 		getRecordsOutput.NextShardIterator = nil
+		getRecordsErr = nil
 		shards = []*kinesis.Shard{}
+		ExponentialBackoffBase = time.Millisecond
+		callCount = 0
 	})
 
 	Describe("main", func() {
@@ -161,8 +187,25 @@ var _ = Describe("kinesiscat", func() {
 			Expect(exitCode).To(Equal(2))
 		})
 
-		It("does things", func() {
+		It("streams messages", func() {
+			// swap out the client
+			old := buildKinesisClient
+			buildKinesisClient = func(region string) (client kinesisiface.KinesisAPI) {
+				return &mockKinesisClient{}
+			}
+			defer func() { buildKinesisClient = old }()
 
+			// return some records
+			shardId := "123"
+			shards = []*kinesis.Shard{{ShardId: &shardId}}
+			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1', '2'}}}
+
+			stdout := captureStdout(func() {
+				withOsArgs([]string{"kinesiscat", "my-stream", "--region", "us-west-1"}, func() {
+					main()
+				})
+			})
+			Expect(stdout).To(Equal("12\n"))
 		})
 	})
 
@@ -176,11 +219,8 @@ var _ = Describe("kinesiscat", func() {
 
 		It("exits when there is an err", func() {
 			err := errors.New("bar")
-			var exitCode int
-			stderr := captureStderr(func() {
-				exitCode = captureExit(func() {
-					fatalfIfErr("foo: %v", err)
-				})
+			exitCode, stderr := captureExitAndMessage(func() {
+				fatalfIfErr("foo: %v", err)
 			})
 			Expect(exitCode).To(Equal(1))
 			Expect(stderr).To(Equal("foo: bar"))
@@ -279,8 +319,7 @@ var _ = Describe("kinesiscat", func() {
 					time.Sleep(time.Duration(ms) * time.Millisecond)
 				})
 			})
-			Expect(elapsed).To(BeNumerically(">", 30*time.Millisecond))
-			Expect(elapsed).To(BeNumerically("<", 35*time.Millisecond))
+			Expect(elapsed).To(BeNumerically("~", 35*time.Millisecond, 5*time.Millisecond))
 		})
 	})
 
@@ -296,10 +335,11 @@ var _ = Describe("kinesiscat", func() {
 
 		It("iterates until the iterator is gone", func() {
 			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1'}}, {Data: []byte{'2'}}}
-			test := "test"
-			getRecordsOutput.NextShardIterator = &test
+			nextIterator := "next"
+			getRecordsOutput.NextShardIterator = &nextIterator
+
 			calls := []byte{}
-			streamRecords(&mockKinesisClient{}, "AABBCC", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "first", func(data *[]byte) {
 				if len(calls) == 2 {
 					getRecordsOutput.NextShardIterator = nil
 				}
@@ -331,6 +371,42 @@ var _ = Describe("kinesiscat", func() {
 			})
 
 			Expect(calls).To(Equal([]byte{'1', '2', '3'}))
+		})
+
+		It("fails when hitting unknown error", func() {
+			getRecordsErr = errors.New("Whoops")
+			exitCode, stderr := captureExitAndMessage(func() {
+				streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+					Fail("Should not go here")
+				})
+			})
+			Expect(exitCode).To(Equal(1))
+			Expect(stderr).To(Equal("get records error: Whoops"))
+		})
+
+		It("retries when hitting ThroughputExceededException", func() {
+			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1'}}, {Data: []byte{'2'}}}
+			getRecordsErr = awserr.New(kinesis.ErrCodeProvisionedThroughputExceededException, "Throttled", nil)
+			calls := []byte{}
+			elapsed := duration(func() {
+				streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+					calls = append(calls, *data...)
+				})
+			})
+			Expect(calls).To(Equal([]byte{'1', '2'}))
+			Expect(elapsed).To(BeNumerically("~", 2*time.Millisecond, time.Millisecond))
+			Expect(ExponentialBackoffBase).To(Equal(time.Millisecond)) // not modified
+		})
+
+		It("retries when hitting unknown aws error", func() {
+			getRecordsErr = awserr.New("Code", "Throttled", nil)
+			exitCode, stderr := captureExitAndMessage(func() {
+				streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+					Fail("Should not go here")
+				})
+			})
+			Expect(exitCode).To(Equal(1))
+			Expect(stderr).To(Equal("get records error: Code: Throttled"))
 		})
 	})
 })

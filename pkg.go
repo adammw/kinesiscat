@@ -21,6 +21,7 @@ const Md5Len = 16
 
 var ProtobufHeader = []byte("\xf3\x89\x9a\xc2")
 var Newline = []byte{'\n'}
+var ExponentialBackoffBase = time.Second
 
 type Options struct {
 	Region string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
@@ -43,7 +44,7 @@ func fatalfIfErr(format string, err error) {
 	}
 }
 
-func buildKinesisClient(region string) (client kinesisiface.KinesisAPI) {
+var buildKinesisClient = func(region string) (client kinesisiface.KinesisAPI) {
 	awsConfig := aws.NewConfig().WithRegion(region)
 	awsSession, err := session.NewSession(awsConfig)
 	fatalfIfErr("aws error: %v", err)
@@ -84,41 +85,42 @@ func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardI
 }
 
 func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func(*[]byte)) {
-	var err error
-	var resp *kinesis.GetRecordsOutput
 	var errCount uint = 0
 
-	for err == nil {
-		params := kinesis.GetRecordsInput{
-			ShardIterator: &shardIterator,
-		}
+	for {
+		params := kinesis.GetRecordsInput{ShardIterator: &shardIterator}
 
-		resp, err = client.GetRecords(&params)
-		// TODO: turn backoff into a method
-		if err != nil {
-			if aerr, ok := err.(awserr.Error); ok {
-				// retry on ProvisionedThroughputExceededException with exponential backoff
-				if aerr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException {
-					time.Sleep(1 << errCount)
-					errCount += 1
-					err = nil
-					continue
-				} else {
-					fatalErr("get records error: %v", err)
-				}
-			}
-		} else {
-			// reset backoff counter on success
-			errCount = 0
+		resp, err := client.GetRecords(&params)
+		if exponentialBackoff(err, &errCount) {
+			continue
 		}
 
 		eachRecord(resp.Records, fn)
 
+		// TODO: can we do `for shardIterator != nil` instead ?
 		if resp.NextShardIterator == nil {
 			break
 		}
 		shardIterator = *resp.NextShardIterator
 	}
+}
+
+func exponentialBackoff(err error, errCount *uint) (retry bool) {
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			// retry on ProvisionedThroughputExceededException with exponential backoff
+			if aerr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException {
+				time.Sleep(ExponentialBackoffBase << *errCount)
+				*errCount += 1
+				return true
+			}
+		}
+		fatalErr("get records error: %v", err)
+	} else {
+		// reset backoff counter on success
+		*errCount = 0
+	}
+	return
 }
 
 // yields each record from given record or aggregatedRecords
