@@ -286,22 +286,20 @@ var _ = Describe("kinesiscat", func() {
 
 	Describe(".streamRecords", func() {
 		It("streams regular records", func() {
-			mockSvc := &mockKinesisClient{}
 			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1'}}, {Data: []byte{'2'}}}
 			calls := []byte{}
-			streamRecords(mockSvc, "AABBCC", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "AABBCC", func(data *[]byte) {
 				calls = append(calls, *data...)
 			})
 			Expect(calls).To(Equal([]byte{'1', '2'}))
 		})
 
 		It("iterates until the iterator is gone", func() {
-			mockSvc := &mockKinesisClient{}
 			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1'}}, {Data: []byte{'2'}}}
 			test := "test"
 			getRecordsOutput.NextShardIterator = &test
 			calls := []byte{}
-			streamRecords(mockSvc, "AABBCC", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "AABBCC", func(data *[]byte) {
 				if len(calls) == 2 {
 					getRecordsOutput.NextShardIterator = nil
 				}
@@ -310,17 +308,29 @@ var _ = Describe("kinesiscat", func() {
 			Expect(calls).To(Equal([]byte{'1', '2', '1', '2'}))
 		})
 
-		It("expends protobuf", func() {
-			mockSvc := &mockKinesisClient{}
-			aggregatedRecord := &kpl.AggregatedRecord{Records: []*kpl.Record{{Data: []byte{'1'}}, {Data: []byte{'2'}}}}
-			data, _ := proto.Marshal(aggregatedRecord)
-			getRecordsOutput.Records = []*kinesis.Record{{Data: data}, {Data: []byte{'3'}}}
+		It("expands protobuf", func() {
+			// given an AggregatedRecord
+			var index uint64 = 1
+			aggregatedRecord := &kpl.AggregatedRecord{
+				Records: []*kpl.Record{
+					{Data: []byte{'1'}, PartitionKeyIndex: &index},
+					{Data: []byte{'2'}, PartitionKeyIndex: &index},
+				}}
+
+			// marshal and add header + fake md5
+			aggregate, err := proto.Marshal(aggregatedRecord)
+			fatalfIfErr("Marshal", err)
+			aggregate = append(ProtobufHeader, aggregate...)
+			aggregate = append(aggregate, []byte{'1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '1', '2', '3', '4', '5', '6'}...)
+
+			// stream aggregate and a regular record
+			getRecordsOutput.Records = []*kinesis.Record{{Data: aggregate}, {Data: []byte{'3'}}}
 			calls := []byte{}
-			streamRecords(mockSvc, "AABBCC", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "AABBCC", func(data *[]byte) {
 				calls = append(calls, *data...)
 			})
-			// TODO: does not return the correct result ... so marshaling needs a fixup :(
-			//Expect(calls).To(Equal([]byte{'1', '2', '3'}))
+
+			Expect(calls).To(Equal([]byte{'1', '2', '3'}))
 		})
 	})
 })

@@ -121,6 +121,7 @@ func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func
 	}
 }
 
+// yields each record from given record or aggregatedRecords
 func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
 	for _, record := range aggregatedRecords {
 		isAggregated :=
@@ -130,7 +131,8 @@ func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
 		if isAggregated {
 			// see https://github.com/awslabs/amazon-kinesis-producer/blob/master/aggregation-format.md
 			agg := &kpl.AggregatedRecord{}
-			err := proto.Unmarshal(record.Data[len(ProtobufHeader):len(record.Data)-Md5Len], agg)
+			data := record.Data[len(ProtobufHeader) : len(record.Data)-Md5Len]
+			err := proto.Unmarshal(data, agg)
 			fatalfIfErr("protobuf unmarshal error: %v", err)
 			for _, record := range agg.Records {
 				fn(&record.Data)
