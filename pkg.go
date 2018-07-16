@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/adammw/kinesiscat/kpl"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -12,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/golang/protobuf/proto"
 	"github.com/jessevdk/go-flags"
-	"github.com/zendesk/kinesiscat/kpl"
 	"sync"
 	"time"
 )
@@ -21,13 +21,14 @@ const Md5Len = 16
 
 var ProtobufHeader = []byte("\xf3\x89\x9a\xc2")
 var Newline = []byte{'\n'}
+var ExponentialBackoffBase = time.Second
 
 type Options struct {
 	Region string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
 
 	Args struct {
-		StreamName string `positional-arg-name:"STREAM_NAME" required:"true"`
-	} `positional-args:"yes" required:"yes"`
+		StreamName string `positional-arg-name:"STREAM_NAME"`
+	} `positional-args:"yes"`
 }
 
 var exitFn = os.Exit
@@ -43,7 +44,7 @@ func fatalfIfErr(format string, err error) {
 	}
 }
 
-func buildKinesisClient(region string) (client kinesisiface.KinesisAPI) {
+var buildKinesisClient = func(region string) (client kinesisiface.KinesisAPI) {
 	awsConfig := aws.NewConfig().WithRegion(region)
 	awsSession, err := session.NewSession(awsConfig)
 	fatalfIfErr("aws error: %v", err)
@@ -84,35 +85,19 @@ func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardI
 }
 
 func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func(*[]byte)) {
-	var err error
-	var resp *kinesis.GetRecordsOutput
 	var errCount uint = 0
 
-	for err == nil {
-		params := kinesis.GetRecordsInput{
-			ShardIterator: &shardIterator,
-		}
+	for {
+		params := kinesis.GetRecordsInput{ShardIterator: &shardIterator}
 
-		resp, err = client.GetRecords(&params)
-		if err != nil {
-			if aerr, ok := err.(awserr.Error); ok {
-				// retry on ProvisionedThroughputExceededException with exponential backoff
-				if aerr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException {
-					time.Sleep(1 << errCount)
-					errCount += 1
-					err = nil
-					continue
-				} else {
-					fatalErr("get records error: %v", err)
-				}
-			}
-		} else {
-			// reset backoff counter on success
-			errCount = 0
+		resp, err := client.GetRecords(&params)
+		if exponentialBackoff(err, &errCount) {
+			continue
 		}
 
 		eachRecord(resp.Records, fn)
 
+		// TODO: can we do `for shardIterator != nil` instead ?
 		if resp.NextShardIterator == nil {
 			break
 		}
@@ -120,14 +105,38 @@ func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func
 	}
 }
 
+func exponentialBackoff(err error, errCount *uint) (retry bool) {
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			// retry on ProvisionedThroughputExceededException with exponential backoff
+			if aerr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException {
+				sleepTime := ExponentialBackoffBase << *errCount
+				fmt.Fprintf(os.Stderr, "Throughput limit exceeded, waiting %v\n", sleepTime)
+				time.Sleep(sleepTime)
+				*errCount += 1
+				return true
+			}
+		}
+		fatalErr("get records error: %v", err)
+	} else {
+		// reset backoff counter on success
+		*errCount = 0
+	}
+	return
+}
+
+// yields each record from given record or aggregatedRecords
 func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
 	for _, record := range aggregatedRecords {
-		isAggregated := bytes.Compare(record.Data[0:len(ProtobufHeader)], ProtobufHeader) == 0
+		isAggregated :=
+			len(record.Data) > len(ProtobufHeader) &&
+				bytes.Compare(record.Data[0:len(ProtobufHeader)], ProtobufHeader) == 0
 
 		if isAggregated {
 			// see https://github.com/awslabs/amazon-kinesis-producer/blob/master/aggregation-format.md
 			agg := &kpl.AggregatedRecord{}
-			err := proto.Unmarshal(record.Data[len(ProtobufHeader):len(record.Data)-Md5Len], agg)
+			data := record.Data[len(ProtobufHeader) : len(record.Data)-Md5Len]
+			err := proto.Unmarshal(data, agg)
 			fatalfIfErr("protobuf unmarshal error: %v", err)
 			for _, record := range agg.Records {
 				fn(&record.Data)
@@ -150,14 +159,31 @@ func parallel(things []string, fn func(string)) {
 	wg.Wait()
 }
 
+func showAvailableStreams(client kinesisiface.KinesisAPI) {
+	out, err := client.ListStreams(&kinesis.ListStreamsInput{})
+	fatalfIfErr("get streams error: %v", err)
+	fmt.Fprintf(os.Stderr, "No stream name give, please chose one of these streams:\n")
+	for _, name := range out.StreamNames {
+		fmt.Fprintf(os.Stderr, "%v\n", *name)
+	}
+	exitFn(2)
+}
+
 func main() {
+	// parse options
 	var opts Options
 	_, err := flags.ParseArgs(&opts, os.Args[1:])
 	if err != nil {
 		exitFn(2)
 	}
 
+	// show available streams if the user did not give one
 	var client = buildKinesisClient(opts.Region)
+	if opts.Args.StreamName == "" {
+		showAvailableStreams(client)
+	}
+
+	// stream from all shards of the stream
 	var shardIds = getShardIds(client, opts.Args.StreamName)
 	var shardIterators = getShardIterators(client, opts.Args.StreamName, shardIds)
 
