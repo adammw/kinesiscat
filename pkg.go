@@ -24,7 +24,10 @@ var Newline = []byte{'\n'}
 var ExponentialBackoffBase = time.Second
 
 type Options struct {
-	Region string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
+	Region         string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
+	IteratorType   string `short:"t" long:"iterator-type" description:"Shard Iterator Type" default:"LATEST" choice:"AT_SEQUENCE_NUMBER" choice:"AFTER_SEQUENCE_NUMBER" choice:"AT_TIMESTAMP" choice:"TRIM_HORIZON" choice:"LATEST"`
+	Timestamp      int64  `long:"timestamp" description:"Starting timestamp (used with AT_TIMESTAMP iterator)"`
+	SequenceNumber string `long:"sequence-number" description:"Starting sequence number (used with *_SEQUENCE_NUMBER iterators)"`
 
 	Args struct {
 		StreamName string `positional-arg-name:"STREAM_NAME"`
@@ -69,14 +72,27 @@ func getShardIds(client kinesisiface.KinesisAPI, streamName string) (shardIds []
 	return
 }
 
-func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardIds []string) (shardIterators []string) {
+func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardIds []string, shardIteratorType string, sequenceNumber string, timestampSec int64) (shardIterators []string) {
 	shardIterators = []string{}
-	shardIteratorType := kinesis.ShardIteratorTypeLatest
+
+	var startingSequenceNumberPtr = &sequenceNumber
+	if shardIteratorType != kinesis.ShardIteratorTypeAtSequenceNumber && shardIteratorType != kinesis.ShardIteratorTypeAfterSequenceNumber {
+		startingSequenceNumberPtr = nil
+	}
+
+	var timestampPtr *time.Time = nil
+	if shardIteratorType == kinesis.ShardIteratorTypeAtTimestamp {
+		timestamp := time.Unix(timestampSec, 0)
+		timestampPtr = &timestamp
+	}
+
 	for _, shardId := range shardIds {
 		iterator, err := client.GetShardIterator(&kinesis.GetShardIteratorInput{
-			ShardId:           &shardId,
-			ShardIteratorType: &shardIteratorType,
-			StreamName:        &streamName,
+			ShardId:                &shardId,
+			ShardIteratorType:      &shardIteratorType,
+			StartingSequenceNumber: startingSequenceNumberPtr,
+			Timestamp:              timestampPtr,
+			StreamName:             &streamName,
 		})
 		fatalfIfErr("get iterator error: %v", err)
 		shardIterators = append(shardIterators, *iterator.ShardIterator)
@@ -185,7 +201,7 @@ func main() {
 
 	// stream from all shards of the stream
 	var shardIds = getShardIds(client, opts.Args.StreamName)
-	var shardIterators = getShardIterators(client, opts.Args.StreamName, shardIds)
+	var shardIterators = getShardIterators(client, opts.Args.StreamName, shardIds, opts.IteratorType, opts.SequenceNumber, opts.Timestamp)
 
 	parallel(shardIterators, func(shardIterator string) {
 		streamRecords(client, shardIterator, func(data *[]byte) {

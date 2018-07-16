@@ -105,6 +105,7 @@ func captureExitAndMessage(fn func()) (exitCode int, stderr string) {
 }
 
 var shards []*kinesis.Shard
+var getShardIteratorInput *kinesis.GetShardIteratorInput
 var getRecordsOutput = &kinesis.GetRecordsOutput{
 	Records:           []*kinesis.Record{},
 	NextShardIterator: nil,
@@ -120,7 +121,8 @@ func (m *mockKinesisClient) GetRecords(*kinesis.GetRecordsInput) (output *kinesi
 }
 
 func (m *mockKinesisClient) GetShardIterator(input *kinesis.GetShardIteratorInput) (output *kinesis.GetShardIteratorOutput, err error) {
-	iterator := fmt.Sprintf("shard-iterator-%s-%s", *input.StreamName, *input.ShardId)
+	iterator := fmt.Sprintf("shard-iterator-%s-%s-%s", *input.StreamName, *input.ShardId, *input.ShardIteratorType)
+	getShardIteratorInput = input
 	output = &kinesis.GetShardIteratorOutput{
 		ShardIterator: &iterator,
 	}
@@ -303,9 +305,28 @@ var _ = Describe("kinesiscat", func() {
 		It("returns an array of shard iterator ids", func() {
 			mockSvc := &mockKinesisClient{}
 			shardIds := []string{"foo123", "foo124"}
-			shardIterators := []string{"shard-iterator-fake-stream-foo123", "shard-iterator-fake-stream-foo124"}
-			actual := getShardIterators(mockSvc, "fake-stream", shardIds)
+			shardIterators := []string{"shard-iterator-fake-stream-foo123-LATEST", "shard-iterator-fake-stream-foo124-LATEST"}
+			actual := getShardIterators(mockSvc, "fake-stream", shardIds, "LATEST", "", 0)
 			Expect(actual).To(Equal(shardIterators))
+			Expect(getShardIteratorInput.Timestamp).To(BeNil())
+			Expect(getShardIteratorInput.StartingSequenceNumber).To(BeNil())
+		})
+
+		It("sets timestamp for AT_TIMESTAMP shard iterator type", func() {
+			mockSvc := &mockKinesisClient{}
+			shardIds := []string{"foo123", "foo124"}
+			now := time.Now().Round(time.Second)
+			getShardIterators(mockSvc, "fake-stream", shardIds, "AT_TIMESTAMP", "", now.Unix())
+			Expect(*getShardIteratorInput.Timestamp).To(Equal(now))
+			Expect(getShardIteratorInput.StartingSequenceNumber).To(BeNil())
+		})
+
+		It("sets starting sequence number for AT_ shard iterator type", func() {
+			mockSvc := &mockKinesisClient{}
+			shardIds := []string{"foo123", "foo124"}
+			getShardIterators(mockSvc, "fake-stream", shardIds, "AT_SEQUENCE_NUMBER", "abc123", 0)
+			Expect(getShardIteratorInput.Timestamp).To(BeNil())
+			Expect(*getShardIteratorInput.StartingSequenceNumber).To(Equal("abc123"))
 		})
 	})
 
