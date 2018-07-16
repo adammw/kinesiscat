@@ -27,8 +27,8 @@ type Options struct {
 	Region string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
 
 	Args struct {
-		StreamName string `positional-arg-name:"STREAM_NAME" required:"true"`
-	} `positional-args:"yes" required:"yes"`
+		StreamName string `positional-arg-name:"STREAM_NAME"`
+	} `positional-args:"yes"`
 }
 
 var exitFn = os.Exit
@@ -159,14 +159,31 @@ func parallel(things []string, fn func(string)) {
 	wg.Wait()
 }
 
+func showAvailableStreams(client kinesisiface.KinesisAPI) {
+	out, err := client.ListStreams(&kinesis.ListStreamsInput{})
+	fatalfIfErr("get streams error: %v", err)
+	fmt.Fprintf(os.Stderr, "No stream name give, please chose one of these streams:\n")
+	for _, name := range out.StreamNames {
+		fmt.Fprintf(os.Stderr, "%v\n", *name)
+	}
+	exitFn(2)
+}
+
 func main() {
+	// parse options
 	var opts Options
 	_, err := flags.ParseArgs(&opts, os.Args[1:])
 	if err != nil {
 		exitFn(2)
 	}
 
+	// show available streams if the user did not give one
 	var client = buildKinesisClient(opts.Region)
+	if opts.Args.StreamName == "" {
+		showAvailableStreams(client)
+	}
+
+	// stream from all shards of the stream
 	var shardIds = getShardIds(client, opts.Args.StreamName)
 	var shardIterators = getShardIterators(client, opts.Args.StreamName, shardIds)
 

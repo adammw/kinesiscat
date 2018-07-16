@@ -138,6 +138,11 @@ func (m *mockKinesisClient) DescribeStreamPages(input *kinesis.DescribeStreamInp
 	return nil
 }
 
+func (m *mockKinesisClient) ListStreams(input *kinesis.ListStreamsInput) (output *kinesis.ListStreamsOutput, err error) {
+	name := "stream-a"
+	return &kinesis.ListStreamsOutput{StreamNames: []*string{&name}}, nil
+}
+
 var callCount = 0
 
 type mockErrKinesisClient struct {
@@ -160,6 +165,15 @@ func duration(fn func()) (duration time.Duration) {
 	return time.Since(start)
 }
 
+func withFakeKinesisClient(fn func()) {
+	old := buildKinesisClient
+	buildKinesisClient = func(region string) (client kinesisiface.KinesisAPI) {
+		return &mockKinesisClient{}
+	}
+	defer func() { buildKinesisClient = old }()
+	fn()
+}
+
 var _ = Describe("kinesiscat", func() {
 	BeforeEach(func() {
 		getRecordsOutput.Records = []*kinesis.Record{}
@@ -172,40 +186,35 @@ var _ = Describe("kinesiscat", func() {
 
 	Describe("main", func() {
 		It("shows --help", func() {
-			var actual string
-			var exitCode int
-
 			withOsArgs([]string{"kinesiscat", "--help"}, func() {
-				actual = captureStdout(func() {
-					exitCode = captureExit(func() {
-						main()
-					})
+				out := captureStdout(func() {
+					Expect(captureExit(main)).To(Equal(2))
+				})
+				Expect(out).To(ContainSubstring("Usage:"))
+			})
+		})
+
+		It("shows available streams when user did not chose one", func() {
+			withFakeKinesisClient(func() {
+				withOsArgs([]string{"kinesiscat", "--region", "us-west-1"}, func() {
+					code, out := captureExitAndMessage(main)
+					Expect(out).To(Equal("No stream name give, please chose one of these streams:\nstream-a\n"))
+					Expect(code).To(Equal(2))
 				})
 			})
-
-			Expect(actual).To(ContainSubstring("Usage:"))
-			Expect(exitCode).To(Equal(2))
 		})
 
 		It("streams messages", func() {
-			// swap out the client
-			old := buildKinesisClient
-			buildKinesisClient = func(region string) (client kinesisiface.KinesisAPI) {
-				return &mockKinesisClient{}
-			}
-			defer func() { buildKinesisClient = old }()
+			withFakeKinesisClient(func() {
+				shardId := "123"
+				shards = []*kinesis.Shard{{ShardId: &shardId}}
+				getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1', '2'}}}
 
-			// return some records
-			shardId := "123"
-			shards = []*kinesis.Shard{{ShardId: &shardId}}
-			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1', '2'}}}
-
-			stdout := captureStdout(func() {
-				withOsArgs([]string{"kinesiscat", "my-stream", "--region", "us-west-1"}, func() {
-					main()
+				stdout := captureStdout(func() {
+					withOsArgs([]string{"kinesiscat", "my-stream", "--region", "us-west-1"}, main)
 				})
+				Expect(stdout).To(Equal("12\n"))
 			})
-			Expect(stdout).To(Equal("12\n"))
 		})
 	})
 
