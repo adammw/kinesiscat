@@ -171,7 +171,7 @@ var _ = Describe("kinesiscat", func() {
 	})
 
 	Describe("main", func() {
-		It("shows help", func() {
+		It("shows --help", func() {
 			var actual string
 			var exitCode int
 
@@ -272,6 +272,7 @@ var _ = Describe("kinesiscat", func() {
 			Expect(outRecords).To(ContainElement([]byte("bar")))
 		})
 	})
+
 	Describe(".getShardIds", func() {
 		It("returns empty array when no shards found", func() {
 			mockSvc := &mockKinesisClient{}
@@ -389,9 +390,13 @@ var _ = Describe("kinesiscat", func() {
 			getRecordsErr = awserr.New(kinesis.ErrCodeProvisionedThroughputExceededException, "Throttled", nil)
 			calls := []byte{}
 			elapsed := duration(func() {
-				streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
-					calls = append(calls, *data...)
+				out := captureStderr(func() {
+					streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+						calls = append(calls, *data...)
+					})
 				})
+				Expect(out).To(Equal("Throughput limit exceeded, waiting 1ms\n"))
+
 			})
 			Expect(calls).To(Equal([]byte{'1', '2'}))
 			Expect(elapsed).To(BeNumerically("~", 2*time.Millisecond, time.Millisecond))

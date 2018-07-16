@@ -110,7 +110,9 @@ func exponentialBackoff(err error, errCount *uint) (retry bool) {
 		if aerr, ok := err.(awserr.Error); ok {
 			// retry on ProvisionedThroughputExceededException with exponential backoff
 			if aerr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException {
-				time.Sleep(ExponentialBackoffBase << *errCount)
+				sleepTime := ExponentialBackoffBase << *errCount
+				fmt.Fprintf(os.Stderr, "Throughput limit exceeded, waiting %v\n", sleepTime)
+				time.Sleep(sleepTime)
 				*errCount += 1
 				return true
 			}
