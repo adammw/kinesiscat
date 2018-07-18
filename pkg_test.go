@@ -182,7 +182,7 @@ var _ = Describe("kinesiscat", func() {
 		getRecordsOutput.NextShardIterator = nil
 		getRecordsErr = nil
 		shards = []*kinesis.Shard{}
-		ExponentialBackoffBase = time.Millisecond
+		ExponentialBackoffBase = 10 * time.Millisecond
 		callCount = 0
 	})
 
@@ -425,12 +425,12 @@ var _ = Describe("kinesiscat", func() {
 						calls = append(calls, *data...)
 					})
 				})
-				Expect(out).To(Equal("Throughput limit exceeded, waiting 1ms\n"))
+				Expect(out).To(Equal("Throughput limit exceeded, waiting 10ms\n"))
 
 			})
 			Expect(calls).To(Equal([]byte{'1', '2'}))
-			Expect(elapsed).To(BeNumerically("~", 2*time.Millisecond, time.Millisecond))
-			Expect(ExponentialBackoffBase).To(Equal(time.Millisecond)) // not modified
+			Expect(elapsed).To(BeNumerically("~", 10*time.Millisecond, 5*time.Millisecond))
+			Expect(ExponentialBackoffBase).To(Equal(10 * time.Millisecond)) // not modified
 		})
 
 		It("retries when hitting unknown aws error", func() {

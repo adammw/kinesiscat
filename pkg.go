@@ -182,7 +182,6 @@ func showAvailableStreams(client kinesisiface.KinesisAPI) {
 	for _, name := range out.StreamNames {
 		fmt.Fprintf(os.Stderr, "%v\n", *name)
 	}
-	exitFn(2)
 }
 
 func main() {
@@ -197,6 +196,7 @@ func main() {
 	var client = buildKinesisClient(opts.Region)
 	if opts.Args.StreamName == "" {
 		showAvailableStreams(client)
+		exitFn(2)
 	}
 
 	// stream from all shards of the stream

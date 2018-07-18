@@ -9,7 +9,7 @@ Inspired by [edenhill/kafkacat](https://github.com/edenhill/kafkacat).
 ## Usage
 
 ```bash
-go get https://github.com/adammw/kinesiscat
+go get github.com/adammw/kinesiscat/...
 kinesiscat [OPTIONS] <STREAM_NAME>
 ```
 
