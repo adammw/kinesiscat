@@ -425,7 +425,7 @@ var _ = Describe("kinesiscat", func() {
 						calls = append(calls, *data...)
 					})
 				})
-				Expect(out).To(Equal("Throughput limit exceeded, waiting 10ms\n"))
+				Expect(out).To(Equal("Throughput limit exceeded, waiting 10ms\nRetrying request (retry count 1)\n"))
 
 			})
 			Expect(calls).To(Equal([]byte{'1', '2'}))

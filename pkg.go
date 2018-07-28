@@ -130,6 +130,7 @@ func exponentialBackoff(err error, errCount *uint) (retry bool) {
 				fmt.Fprintf(os.Stderr, "Throughput limit exceeded, waiting %v\n", sleepTime)
 				time.Sleep(sleepTime)
 				*errCount += 1
+				fmt.Fprintf(os.Stderr, "Retrying request (retry count %v)\n", *errCount)
 				return true
 			}
 		}
