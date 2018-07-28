@@ -24,10 +24,11 @@ var Newline = []byte{'\n'}
 var ExponentialBackoffBase = time.Second
 
 type Options struct {
-	Region         string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
-	IteratorType   string `short:"t" long:"iterator-type" description:"Shard Iterator Type" default:"LATEST" choice:"AT_SEQUENCE_NUMBER" choice:"AFTER_SEQUENCE_NUMBER" choice:"AT_TIMESTAMP" choice:"TRIM_HORIZON" choice:"LATEST"`
-	Timestamp      int64  `long:"timestamp" description:"Starting timestamp (used with AT_TIMESTAMP iterator)"`
-	SequenceNumber string `long:"sequence-number" description:"Starting sequence number (used with *_SEQUENCE_NUMBER iterators)"`
+	Region          string `long:"region" description:"AWS Region" required:"true" env:"AWS_REGION"`
+	IteratorType    string `short:"t" long:"iterator-type" description:"Shard Iterator Type" default:"LATEST" choice:"AT_SEQUENCE_NUMBER" choice:"AFTER_SEQUENCE_NUMBER" choice:"AT_TIMESTAMP" choice:"TRIM_HORIZON" choice:"LATEST"`
+	Timestamp       int64  `long:"timestamp" description:"Starting timestamp (used with AT_TIMESTAMP iterator)"`
+	SequenceNumber  string `long:"sequence-number" description:"Starting sequence number (used with *_SEQUENCE_NUMBER iterators)"`
+	StopAtTimestamp int64  `long:"stop-at-timestamp" description:"Stop when timestamp is reached"`
 
 	Args struct {
 		StreamName string `positional-arg-name:"STREAM_NAME"`
@@ -100,7 +101,7 @@ func getShardIterators(client kinesisiface.KinesisAPI, streamName string, shardI
 	return
 }
 
-func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func(*[]byte)) {
+func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, filter func(*kinesis.Record) bool, fn func(*[]byte)) {
 	var errCount uint = 0
 
 	for {
@@ -111,12 +112,11 @@ func streamRecords(client kinesisiface.KinesisAPI, shardIterator string, fn func
 			continue
 		}
 
-		eachRecord(resp.Records, fn)
-
-		// TODO: can we do `for shardIterator != nil` instead ?
-		if resp.NextShardIterator == nil {
+		filterResponse := eachRecord(resp.Records, filter, fn)
+		if !filterResponse || resp.NextShardIterator == nil {
 			break
 		}
+
 		shardIterator = *resp.NextShardIterator
 	}
 }
@@ -130,6 +130,7 @@ func exponentialBackoff(err error, errCount *uint) (retry bool) {
 				fmt.Fprintf(os.Stderr, "Throughput limit exceeded, waiting %v\n", sleepTime)
 				time.Sleep(sleepTime)
 				*errCount += 1
+				fmt.Fprintf(os.Stderr, "Retrying request (retry count %v)\n", *errCount)
 				return true
 			}
 		}
@@ -142,8 +143,15 @@ func exponentialBackoff(err error, errCount *uint) (retry bool) {
 }
 
 // yields each record from given record or aggregatedRecords
-func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
+func eachRecord(aggregatedRecords []*kinesis.Record, filter func(*kinesis.Record) bool, fn func(*[]byte)) (filterResponse bool) {
+	filterResponse = true
+
 	for _, record := range aggregatedRecords {
+		filterResponse = filter(record)
+		if !filterResponse {
+			break
+		}
+
 		isAggregated :=
 			len(record.Data) > len(ProtobufHeader) &&
 				bytes.Compare(record.Data[0:len(ProtobufHeader)], ProtobufHeader) == 0
@@ -161,6 +169,8 @@ func eachRecord(aggregatedRecords []*kinesis.Record, fn func(*[]byte)) {
 			fn(&record.Data)
 		}
 	}
+
+	return
 }
 
 func parallel(things []string, fn func(string)) {
@@ -203,11 +213,25 @@ func main() {
 	var shardIds = getShardIds(client, opts.Args.StreamName)
 	var shardIterators = getShardIterators(client, opts.Args.StreamName, shardIds, opts.IteratorType, opts.SequenceNumber, opts.Timestamp)
 
+	// set filter to stop after a particular timestamp
+	var filter = func(*kinesis.Record) bool { return true }
+	var stopAtTimestamp time.Time
+	if opts.StopAtTimestamp > 0 {
+		stopAtTimestamp = time.Unix(opts.StopAtTimestamp, 0)
+		filter = func(record *kinesis.Record) bool {
+			return stopAtTimestamp.After(*record.ApproximateArrivalTimestamp)
+		}
+	}
+
 	parallel(shardIterators, func(shardIterator string) {
-		streamRecords(client, shardIterator, func(data *[]byte) {
+		streamRecords(client, shardIterator, filter, func(data *[]byte) {
 			line := append([]byte{}, *data...)
 			line = append(line, Newline...)
 			os.Stdout.Write(line)
 		})
 	})
+
+	if opts.StopAtTimestamp > 0 {
+		fmt.Fprintf(os.Stderr, "Reached timestamp %v, stopping...\n", stopAtTimestamp)
+	}
 }
