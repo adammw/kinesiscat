@@ -111,12 +111,14 @@ var getRecordsOutput = &kinesis.GetRecordsOutput{
 	NextShardIterator: nil,
 }
 var getRecordsErr error
+var getRecordsCallCount = 0
 
 type mockKinesisClient struct {
 	kinesisiface.KinesisAPI
 }
 
 func (m *mockKinesisClient) GetRecords(*kinesis.GetRecordsInput) (output *kinesis.GetRecordsOutput, err error) {
+	getRecordsCallCount += 1
 	return getRecordsOutput, getRecordsErr
 }
 
@@ -145,20 +147,17 @@ func (m *mockKinesisClient) ListStreams(input *kinesis.ListStreamsInput) (output
 	return &kinesis.ListStreamsOutput{StreamNames: []*string{&name}}, nil
 }
 
-var callCount = 0
-
 type mockErrKinesisClient struct {
 	kinesisiface.KinesisAPI
 }
 
 func (m *mockErrKinesisClient) GetRecords(*kinesis.GetRecordsInput) (output *kinesis.GetRecordsOutput, err error) {
-	callCount += 1
-	if callCount == 1 {
+	getRecordsCallCount += 1
+	if getRecordsCallCount == 1 {
 		return nil, getRecordsErr
 	} else {
 		return getRecordsOutput, nil
 	}
-
 }
 
 func duration(fn func()) (duration time.Duration) {
@@ -183,7 +182,7 @@ var _ = Describe("kinesiscat", func() {
 		getRecordsErr = nil
 		shards = []*kinesis.Shard{}
 		ExponentialBackoffBase = 10 * time.Millisecond
-		callCount = 0
+		getRecordsCallCount = 0
 	})
 
 	Describe("main", func() {
@@ -216,6 +215,30 @@ var _ = Describe("kinesiscat", func() {
 					withOsArgs([]string{"kinesiscat", "my-stream", "--region", "us-west-1"}, main)
 				})
 				Expect(stdout).To(Equal("12\n"))
+			})
+		})
+
+		It("stops when encountering records past the stopAtTimestamp", func() {
+			timeAt := func(sec int64) *time.Time { t := time.Unix(sec, 0); return &t }
+			withFakeKinesisClient(func() {
+				shardId := "123"
+				nextShardIterator := "abc123"
+				shards = []*kinesis.Shard{{ShardId: &shardId}}
+				getRecordsOutput.Records = []*kinesis.Record{
+					{ApproximateArrivalTimestamp: timeAt(1), Data: []byte{'0', '1'}},
+					{ApproximateArrivalTimestamp: timeAt(2), Data: []byte{'0', '2'}},
+					{ApproximateArrivalTimestamp: timeAt(3), Data: []byte{'0', '3'}},
+					{ApproximateArrivalTimestamp: timeAt(4), Data: []byte{'0', '4'}},
+				}
+				getRecordsOutput.NextShardIterator = &nextShardIterator
+
+				stdout, stderr := captureAll(func() {
+					withOsArgs([]string{"kinesiscat", "my-stream", "--region", "us-west-1", "--stop-at-timestamp", "3"}, main)
+				})
+
+				Expect(getRecordsCallCount).To(Equal(1))
+				Expect(stdout).To(Equal("01\n02\n"))
+				Expect(stderr).To(Equal(fmt.Sprintf("Reached timestamp %v, stopping...\n", time.Unix(3, 0))))
 			})
 		})
 	})
@@ -252,9 +275,11 @@ var _ = Describe("kinesiscat", func() {
 				{Data: []byte("bar")},
 			}
 			outRecords := [][]byte{}
-			eachRecord(inRecords, func(record *[]byte) {
+			filter := func(*kinesis.Record) bool { return true }
+			ret := eachRecord(inRecords, filter, func(record *[]byte) {
 				outRecords = append(outRecords, *record)
 			})
+			Expect(ret).To(BeTrue())
 			Expect(outRecords).To(ContainElement([]byte("foo")))
 			Expect(outRecords).To(ContainElement([]byte("bar")))
 		})
@@ -276,11 +301,31 @@ var _ = Describe("kinesiscat", func() {
 			inRecords := []*kinesis.Record{{Data: aggregatedRecordData}}
 
 			outRecords := [][]byte{}
-			eachRecord(inRecords, func(record *[]byte) {
+			filter := func(*kinesis.Record) bool { return true }
+			ret := eachRecord(inRecords, filter, func(record *[]byte) {
 				outRecords = append(outRecords, *record)
 			})
+			Expect(ret).To(BeTrue())
 			Expect(outRecords).To(ContainElement([]byte("foo")))
 			Expect(outRecords).To(ContainElement([]byte("bar")))
+		})
+
+		It("breaks and returns when filter returns false", func() {
+			calls := 0
+			inRecords := []*kinesis.Record{
+				{Data: []byte("foo")},
+				{Data: []byte("bar")},
+			}
+			outRecords := [][]byte{}
+			filter := func(*kinesis.Record) bool {
+				calls += 1
+				return calls < 2
+			}
+			ret := eachRecord(inRecords, filter, func(record *[]byte) {
+				outRecords = append(outRecords, *record)
+			})
+			Expect(ret).To(BeFalse())
+			Expect(outRecords).To(ContainElement([]byte("foo")))
 		})
 	})
 
@@ -355,10 +400,12 @@ var _ = Describe("kinesiscat", func() {
 	})
 
 	Describe(".streamRecords", func() {
+		filter := func(*kinesis.Record) bool { return true }
+
 		It("streams regular records", func() {
 			getRecordsOutput.Records = []*kinesis.Record{{Data: []byte{'1'}}, {Data: []byte{'2'}}}
 			calls := []byte{}
-			streamRecords(&mockKinesisClient{}, "AABBCC", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "AABBCC", filter, func(data *[]byte) {
 				calls = append(calls, *data...)
 			})
 			Expect(calls).To(Equal([]byte{'1', '2'}))
@@ -370,7 +417,7 @@ var _ = Describe("kinesiscat", func() {
 			getRecordsOutput.NextShardIterator = &nextIterator
 
 			calls := []byte{}
-			streamRecords(&mockKinesisClient{}, "first", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "first", filter, func(data *[]byte) {
 				if len(calls) == 2 {
 					getRecordsOutput.NextShardIterator = nil
 				}
@@ -397,7 +444,7 @@ var _ = Describe("kinesiscat", func() {
 			// stream aggregate and a regular record
 			getRecordsOutput.Records = []*kinesis.Record{{Data: aggregate}, {Data: []byte{'3'}}}
 			calls := []byte{}
-			streamRecords(&mockKinesisClient{}, "AABBCC", func(data *[]byte) {
+			streamRecords(&mockKinesisClient{}, "AABBCC", filter, func(data *[]byte) {
 				calls = append(calls, *data...)
 			})
 
@@ -407,7 +454,7 @@ var _ = Describe("kinesiscat", func() {
 		It("fails when hitting unknown error", func() {
 			getRecordsErr = errors.New("Whoops")
 			exitCode, stderr := captureExitAndMessage(func() {
-				streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+				streamRecords(&mockErrKinesisClient{}, "AABBCC", filter, func(data *[]byte) {
 					Fail("Should not go here")
 				})
 			})
@@ -421,7 +468,7 @@ var _ = Describe("kinesiscat", func() {
 			calls := []byte{}
 			elapsed := duration(func() {
 				out := captureStderr(func() {
-					streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+					streamRecords(&mockErrKinesisClient{}, "AABBCC", filter, func(data *[]byte) {
 						calls = append(calls, *data...)
 					})
 				})
@@ -436,7 +483,7 @@ var _ = Describe("kinesiscat", func() {
 		It("retries when hitting unknown aws error", func() {
 			getRecordsErr = awserr.New("Code", "Throttled", nil)
 			exitCode, stderr := captureExitAndMessage(func() {
-				streamRecords(&mockErrKinesisClient{}, "AABBCC", func(data *[]byte) {
+				streamRecords(&mockErrKinesisClient{}, "AABBCC", filter, func(data *[]byte) {
 					Fail("Should not go here")
 				})
 			})
